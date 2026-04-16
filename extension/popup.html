@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 340px;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f8fafc;
+      color: #0f172a;
+    }
+    .header {
+      background: linear-gradient(135deg, #6366f1, #7c3aed);
+      padding: 20px;
+      color: white;
+    }
+    .header h1 {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+    .header p {
+      font-size: 12px;
+      opacity: 0.85;
+      margin-top: 4px;
+    }
+    .content {
+      padding: 16px;
+    }
+    .status-box {
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .status-box .label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+      margin-bottom: 6px;
+    }
+    .status-box .value {
+      font-size: 13px;
+      font-weight: 500;
+      color: #0f172a;
+    }
+    .status-box .value.success { color: #059669; }
+    .status-box .value.error { color: #dc2626; }
+    .status-box .value.warning { color: #d97706; }
+    .btn {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #6366f1, #7c3aed);
+      color: white;
+      box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+    }
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(99, 102, 241, 0.4); }
+    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
+    .btn-secondary {
+      background: white;
+      color: #6366f1;
+      border: 1px solid #e2e8f0;
+      margin-top: 8px;
+    }
+    .btn-secondary:hover { background: #f1f5f9; }
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .results {
+      margin-top: 12px;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .results .stat {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+    }
+    .results .stat .num {
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .hint {
+      font-size: 11px;
+      color: #94a3b8;
+      text-align: center;
+      margin-top: 12px;
+      line-height: 1.5;
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>PSA Tracker Importer</h1>
+    <p>Import submissions from your PSA dashboard</p>
+  </div>
+
+  <div class="content">
+    <!-- Status -->
+    <div class="status-box">
+      <div class="label">Current Page</div>
+      <div class="value" id="pageStatus">Checking...</div>
+    </div>
+
+    <!-- Import button -->
+    <button class="btn btn-primary" id="importBtn" disabled>
+      <span id="importBtnText">Import Submissions</span>
+      <div class="spinner hidden" id="importSpinner"></div>
+    </button>
+
+    <!-- Open tracker -->
+    <button class="btn btn-secondary" id="openTracker">
+      Open PSA Tracker
+    </button>
+
+    <!-- Results -->
+    <div class="results hidden" id="results">
+      <div class="status-box">
+        <div class="label">Import Results</div>
+        <div id="resultDetails"></div>
+      </div>
+    </div>
+
+    <p class="hint" id="hint">
+      Navigate to your PSA submissions dashboard to import
+    </p>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
