@@ -284,7 +284,7 @@ export default function SubmissionDetailPage({
               <span className="text-muted-foreground">Submitted</span>
               <span className="flex items-center gap-1">
                 <CalendarIcon className="h-3 w-3" />
-                {format(new Date(submission.submittedDate), "MMM d, yyyy")}
+                {submission.submittedDate ? format(new Date(submission.submittedDate), "MMM d, yyyy") : "—"}
               </span>
             </div>
             {submission.receivedDate && (

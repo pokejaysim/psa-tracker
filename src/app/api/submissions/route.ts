@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAllSubmissions, createSubmission } from "@/lib/queries/submissions";
+import { getAllSubmissions, createSubmission, deleteSubmission } from "@/lib/queries/submissions";
 import { SubmissionStatus, CreateSubmissionInput } from "@/types";
 
 export async function GET(request: NextRequest) {
@@ -20,4 +20,20 @@ export async function POST(request: NextRequest) {
 
   const submission = createSubmission(body);
   return NextResponse.json(submission, { status: 201 });
+}
+
+export async function DELETE(request: NextRequest) {
+  const body = await request.json();
+  const ids: string[] = body.ids;
+
+  if (!ids || ids.length === 0) {
+    return NextResponse.json({ error: "No IDs provided" }, { status: 400 });
+  }
+
+  let deleted = 0;
+  for (const id of ids) {
+    if (deleteSubmission(id)) deleted++;
+  }
+
+  return NextResponse.json({ deleted });
 }

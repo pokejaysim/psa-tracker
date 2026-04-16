@@ -245,7 +245,7 @@ export default function DashboardPage() {
                         <p className="text-xs text-muted-foreground mt-0.5">
                           {sub.totalCards} card{sub.totalCards !== 1 ? "s" : ""} &middot;{" "}
                           {service.label} &middot;{" "}
-                          {format(new Date(sub.submittedDate), "MMM d, yyyy")}
+                          {sub.submittedDate ? format(new Date(sub.submittedDate), "MMM d, yyyy") : "—"}
                         </p>
                       </div>
                     </div>

@@ -125,6 +125,7 @@ export interface CreateSubmissionInput {
   submittedDate: string;
   receivedDate?: string;
   expectedReturnDate?: string;
+  totalCards?: number;
   totalDeclaredValue?: number;
   notes?: string;
 }

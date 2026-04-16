@@ -14,52 +14,59 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   const tab = tabs[0];
   const url = tab?.url || "";
 
-  if (
-    url.includes("psacard.com/myaccount") ||
-    url.includes("psacard.com/submissions") ||
-    url.includes("psacard.com/myorders") ||
-    url.includes("psacard.com/account") ||
-    url.includes("collectors.com")
-  ) {
-    pageStatus.textContent = "PSA Dashboard detected";
+  if (url.includes("psacard.com") || url.includes("collectors.com")) {
+    pageStatus.textContent = "PSA site detected";
     pageStatus.classList.add("success");
     importBtn.disabled = false;
-    hint.textContent = "Click Import to pull your submissions";
-  } else if (url.includes("psacard.com")) {
-    pageStatus.textContent = "PSA site — navigate to My Submissions";
-    pageStatus.classList.add("warning");
-    importBtn.disabled = true;
-    hint.innerHTML = 'Go to <strong>My Account → My Orders</strong> first';
+    hint.textContent = "Click Import to pull your orders";
   } else {
     pageStatus.textContent = "Not on PSA website";
     pageStatus.classList.add("error");
     importBtn.disabled = true;
-    hint.innerHTML = 'Visit <strong>psacard.com</strong> and log in first';
+    hint.innerHTML =
+      'Visit <strong>psacard.com</strong> and go to <strong>My Orders</strong>';
   }
 });
+
+// Wait for a tab to finish loading + extra time for JS rendering
+function waitForTab(tabId, delay = 2000) {
+  return new Promise((resolve) => {
+    function listener(id, info) {
+      if (id === tabId && info.status === "complete") {
+        chrome.tabs.onUpdated.removeListener(listener);
+        setTimeout(resolve, delay);
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
 
 // Import button click
 importBtn.addEventListener("click", async () => {
   importBtn.disabled = true;
-  importBtnText.textContent = "Scraping...";
+  importBtnText.textContent = "Scanning page...";
   importSpinner.classList.remove("hidden");
   resultsDiv.classList.add("hidden");
 
   try {
-    // Inject content script and scrape data
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    const originalUrl = tab.url;
 
-    const [result] = await chrome.scripting.executeScript({
+    // Phase 1: Scrape order list to get order entries + detail URLs
+    const [listResult] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: scrapePSADashboard,
+      func: scrapeOrderList,
     });
 
-    const submissions = result.result;
+    const orders = listResult.result;
 
-    if (!submissions || submissions.length === 0) {
-      importBtnText.textContent = "No submissions found";
+    if (!orders || orders.length === 0) {
+      importBtnText.textContent = "No orders found";
       importSpinner.classList.add("hidden");
-      hint.textContent = "Make sure you're on the Orders/Submissions page";
+      hint.textContent = "Make sure you're on the My Orders page";
       setTimeout(() => {
         importBtnText.textContent = "Import Submissions";
         importBtn.disabled = false;
@@ -67,13 +74,54 @@ importBtn.addEventListener("click", async () => {
       return;
     }
 
-    importBtnText.textContent = `Sending ${submissions.length} to tracker...`;
+    // Phase 2: Navigate to each order detail page and scrape cards
+    for (let i = 0; i < orders.length; i++) {
+      const order = orders[i];
+      if (!order.detailUrl) continue;
 
-    // Send to local tracker
+      importBtnText.textContent = `Scraping order ${i + 1}/${orders.length}...`;
+
+      try {
+        // Navigate tab to the detail page
+        await chrome.tabs.update(tab.id, { url: order.detailUrl });
+        await waitForTab(tab.id, 2000);
+
+        // Scrape the rendered detail page
+        const [detailResult] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: scrapeOrderDetailPage,
+        });
+
+        if (detailResult.result) {
+          const detail = detailResult.result;
+          if (detail.expectedReturnDate)
+            order.expectedReturnDate = detail.expectedReturnDate;
+          if (detail.receivedDate) order.receivedDate = detail.receivedDate;
+          if (detail.submittedDate) order.submittedDate = detail.submittedDate;
+          if (detail.cards && detail.cards.length > 0)
+            order.cards = detail.cards;
+          if (detail.totalCards) order.totalCards = detail.totalCards;
+        }
+      } catch (e) {
+        // Skip this order's detail, keep list-level data
+      }
+    }
+
+    // Navigate back to the original page
+    importBtnText.textContent = "Finishing up...";
+    try {
+      await chrome.tabs.update(tab.id, { url: originalUrl });
+    } catch {
+      // Ignore navigation errors
+    }
+
+    // Phase 3: Send to tracker
+    importBtnText.textContent = `Sending ${orders.length} orders to tracker...`;
+
     const response = await fetch(`${TRACKER_URL}/api/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ submissions }),
+      body: JSON.stringify({ submissions: orders }),
     });
 
     if (!response.ok) {
@@ -83,12 +131,20 @@ importBtn.addEventListener("click", async () => {
     const data = await response.json();
 
     // Show results
-    const created = data.results?.filter((r) => r.action === "created").length ?? 0;
-    const updated = data.results?.filter((r) => r.action === "updated").length ?? 0;
-    const skipped = data.results?.filter((r) => r.action === "skipped").length ?? 0;
+    const created =
+      data.results?.filter((r) => r.action === "created").length ?? 0;
+    const updated =
+      data.results?.filter((r) => r.action === "updated").length ?? 0;
+    const skipped =
+      data.results?.filter((r) => r.action === "skipped").length ?? 0;
+    const totalCards = orders.reduce(
+      (sum, o) => sum + (o.cards?.length || 0),
+      0
+    );
 
     resultDetails.innerHTML = `
-      <div class="stat"><span>Found on page</span><span class="num">${submissions.length}</span></div>
+      <div class="stat"><span>Orders found</span><span class="num">${orders.length}</span></div>
+      <div class="stat"><span>Cards found</span><span class="num">${totalCards}</span></div>
       <div class="stat"><span>New imported</span><span class="num" style="color:#059669">${created}</span></div>
       <div class="stat"><span>Updated</span><span class="num" style="color:#6366f1">${updated}</span></div>
       <div class="stat"><span>Already up to date</span><span class="num" style="color:#94a3b8">${skipped}</span></div>
@@ -106,7 +162,8 @@ importBtn.addEventListener("click", async () => {
   } catch (err) {
     importBtnText.textContent = "Import Failed";
     importSpinner.classList.add("hidden");
-    hint.textContent = err.message || "Make sure PSA Tracker is running on localhost:3000";
+    hint.textContent =
+      err.message || "Make sure PSA Tracker is running on localhost:3000";
     resultDetails.innerHTML = `<div class="value error">${err.message}</div>`;
     resultsDiv.classList.remove("hidden");
 
@@ -122,135 +179,310 @@ openTracker.addEventListener("click", () => {
   chrome.tabs.create({ url: TRACKER_URL });
 });
 
-// This function runs inside the PSA page context
-function scrapePSADashboard() {
-  const submissions = [];
+// ============================================================
+// INJECTED FUNCTIONS — these run inside the PSA page context
+// ============================================================
 
-  // Strategy 1: Look for table rows with order data
-  const tables = document.querySelectorAll("table");
-  for (const table of tables) {
-    const rows = table.querySelectorAll("tbody tr");
-    for (const row of rows) {
-      const cells = row.querySelectorAll("td");
-      if (cells.length < 2) continue;
+// Phase 1: Scrape the orders list page for order entries + detail URLs
+function scrapeOrderList() {
+  const orders = [];
+  const seen = new Set();
 
-      const text = row.textContent || "";
-      // Look for order number patterns (e.g., 65-123456789 or just numeric)
-      const orderMatch = text.match(/(\d{2}-\d{6,12})/);
-      const subMatch = text.match(/Sub[#:\s]*(\d+)/i);
-
-      if (orderMatch) {
-        const sub = {
-          orderNumber: orderMatch[1],
-          submissionNumber: subMatch ? subMatch[1] : undefined,
-        };
-
-        // Try to extract status from the row
-        const statusKeywords = [
-          "arrived", "received", "grading", "assembly", "shipped",
-          "delivered", "complete", "processing", "research", "qa",
-          "order prep", "submitted", "grades ready", "packaging",
-        ];
-        for (const kw of statusKeywords) {
-          if (text.toLowerCase().includes(kw)) {
-            sub.status = kw;
-            break;
-          }
-        }
-
-        // Try to extract service level
-        const serviceKeywords = [
-          "walk-through", "walkthrough", "super express", "express",
-          "regular", "value max", "value plus", "value bulk", "value",
-          "premium", "economy", "bulk",
-        ];
-        for (const kw of serviceKeywords) {
-          if (text.toLowerCase().includes(kw)) {
-            sub.serviceLevel = kw;
-            break;
-          }
-        }
-
-        // Try to extract dates (MM/DD/YYYY or YYYY-MM-DD patterns)
-        const dateMatches = text.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/g);
-        if (dateMatches && dateMatches.length > 0) {
-          sub.submittedDate = parseDateToISO(dateMatches[0]);
-          if (dateMatches.length > 1) {
-            sub.expectedReturnDate = parseDateToISO(dateMatches[dateMatches.length - 1]);
-          }
-        }
-
-        // Try to extract card count
-        const cardMatch = text.match(/(\d+)\s*(?:card|item|qty)/i);
-        if (cardMatch) {
-          sub.totalCards = parseInt(cardMatch[1]);
-        }
-
-        submissions.push(sub);
+  // Walk up from an element to find the full row container
+  function getRowContainer(el) {
+    let current = el;
+    for (let i = 0; i < 8; i++) {
+      if (!current.parentElement) break;
+      current = current.parentElement;
+      const text = current.textContent || "";
+      if (/Sub\s*#/i.test(text) && /\d+\s*(?:Cards?|Items?)/i.test(text)) {
+        return current;
       }
+      if (current.tagName === "TR") return current;
     }
+    return el;
   }
 
-  // Strategy 2: Look for card/list-based layouts if no table found
-  if (submissions.length === 0) {
-    // Look for any elements containing order numbers
-    const allElements = document.querySelectorAll(
-      "[class*='order'], [class*='submission'], [class*='card'], [class*='item'], [class*='row'], [data-order], [data-submission]"
-    );
+  // Find all links that point to order detail pages
+  const allLinks = document.querySelectorAll("a[href]");
 
-    for (const el of allElements) {
-      const text = el.textContent || "";
-      const orderMatch = text.match(/(\d{2}-\d{6,12})/);
+  for (const link of allLinks) {
+    const linkText = link.textContent?.trim() || "";
+    const href = link.href;
 
-      if (orderMatch) {
-        // Avoid duplicates
-        if (submissions.some((s) => s.orderNumber === orderMatch[1])) continue;
+    // Match submission number links like "#14525746"
+    const subNumMatch = linkText.match(/(\d{7,10})/);
+    if (!subNumMatch) continue;
+    if (!href || seen.has(subNumMatch[1])) continue;
 
-        const sub = { orderNumber: orderMatch[1] };
+    // Must look like an order/submission detail link
+    if (
+      !href.includes("/order") &&
+      !href.includes("/submission") &&
+      !href.includes("/myaccount")
+    )
+      continue;
 
-        const statusKeywords = [
-          "arrived", "received", "grading", "assembly", "shipped",
-          "delivered", "complete", "processing", "research", "qa",
-          "order prep", "submitted", "grades ready",
-        ];
-        for (const kw of statusKeywords) {
-          if (text.toLowerCase().includes(kw)) {
-            sub.status = kw;
-            break;
-          }
-        }
+    seen.add(subNumMatch[1]);
 
-        const dateMatches = text.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/g);
-        if (dateMatches && dateMatches.length > 0) {
-          sub.submittedDate = parseDateToISO(dateMatches[0]);
-        }
+    // Walk up to get the full row text
+    const row = getRowContainer(link);
+    const rowText = row.textContent || "";
 
-        submissions.push(sub);
+    const order = { detailUrl: href };
+
+    // Extract submission number (Sub #14525746) — use as primary ID
+    const subMatch = rowText.match(/Sub(?:mission)?\s*#?(\d{7,10})/i);
+    if (subMatch) order.orderNumber = subMatch[1];
+
+    // Extract PSA order number (#26536028) — store as submissionNumber
+    const psaOrderMatch = rowText.match(/#(\d{7,10})\s*[·•]\s*Sub/i);
+    if (psaOrderMatch) order.submissionNumber = psaOrderMatch[1];
+
+    // Fallbacks
+    if (!order.orderNumber && order.submissionNumber) order.orderNumber = order.submissionNumber;
+    if (!order.orderNumber) continue;
+
+    // Extract status
+    const statusPatterns = [
+      [/research\s*&?\s*id/i, "research"],
+      [/grades?\s*ready/i, "grades ready"],
+      [/order\s*prep/i, "order prep"],
+      [/\bcompleting\b/i, "processing"],
+      [/\bcomplete\b/i, "complete"],
+      [/\bgrading\b/i, "grading"],
+      [/\bassembly\b/i, "assembly"],
+      [/\bshipped\b/i, "shipped"],
+      [/\bdelivered\b/i, "delivered"],
+      [/\barrived\b/i, "arrived"],
+      [/\bprocessing\b/i, "processing"],
+      [/\bqa\s*checks?\b/i, "qa"],
+    ];
+    for (const [pattern, status] of statusPatterns) {
+      if (pattern.test(rowText)) {
+        order.status = status;
+        break;
       }
     }
+
+    // Extract service level
+    const servicePatterns = [
+      [/walk[\s-]*through/i, "walk-through"],
+      [/super\s*express/i, "super express"],
+      [/value\s*max/i, "value max"],
+      [/value\s*plus/i, "value plus"],
+      [/value\s*bulk/i, "value bulk"],
+      [/tcg\s*bulk/i, "value_bulk"],
+      [/\bexpress\b/i, "express"],
+      [/\bregular\b/i, "regular"],
+      [/value\s*\(/i, "value"],
+      [/\bvalue\b/i, "value"],
+      [/\beconomy\b/i, "economy"],
+      [/\bbulk\b/i, "bulk"],
+    ];
+    for (const [pattern, level] of servicePatterns) {
+      if (pattern.test(rowText)) {
+        order.serviceLevel = level;
+        break;
+      }
+    }
+
+    // Extract card count
+    const cardMatch = rowText.match(/(\d+)\s*(?:Cards?|Items?)/i);
+    if (cardMatch) order.totalCards = parseInt(cardMatch[1]);
+
+    orders.push(order);
   }
 
-  // Strategy 3: Full page text scan as last resort
-  if (submissions.length === 0) {
+  // Fallback: broad text scan
+  if (orders.length === 0) {
     const bodyText = document.body.textContent || "";
-    const orderMatches = bodyText.match(/\d{2}-\d{6,12}/g);
-    if (orderMatches) {
-      const unique = [...new Set(orderMatches)];
-      for (const orderNum of unique) {
-        submissions.push({ orderNumber: orderNum });
+    const subMatches = [...bodyText.matchAll(/Sub\s*#?\s*(\d{7,10})/gi)];
+    for (const match of subMatches) {
+      const num = match[1];
+      if (!seen.has(num)) {
+        seen.add(num);
+        orders.push({
+          orderNumber: num,
+          submissionNumber: num,
+          detailUrl: null,
+        });
       }
     }
   }
 
-  function parseDateToISO(dateStr) {
-    const parts = dateStr.split("/");
-    if (parts.length === 3) {
-      let [m, d, y] = parts;
-      if (y.length === 2) y = "20" + y;
-      return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  return orders;
+}
+
+// Phase 2: Scrape a fully rendered order detail page (runs on the live DOM)
+function scrapeOrderDetailPage() {
+  const MONTHS = {
+    jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+    jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+    january: "01", february: "02", march: "03", april: "04",
+    june: "06", july: "07", august: "08", september: "09",
+    october: "10", november: "11", december: "12",
+  };
+
+  function parseTextDate(str) {
+    const m = str.match(/(\w+)\s+(\d{1,2}),?\s+(\d{4})/);
+    if (m) {
+      const mo = MONTHS[m[1].toLowerCase()];
+      if (mo) return `${m[3]}-${mo}-${m[2].padStart(2, "0")}`;
     }
-    return dateStr;
+    return null;
   }
 
-  return submissions;
+  const text = document.body.textContent || "";
+  const result = {
+    cards: [],
+    expectedReturnDate: null,
+    receivedDate: null,
+    submittedDate: null,
+    totalCards: null,
+    psaOrderNumber: null,
+  };
+
+  // Extract PSA order number: "Order #26536028"
+  const orderMatch = text.match(/Order\s*#(\d{7,10})/i);
+  if (orderMatch) result.psaOrderNumber = orderMatch[1];
+
+  // Extract estimated completion: "Est. Complete by June 19, 2026"
+  const estMatch = text.match(
+    /Est\.?\s*Complete\s*by\s+(\w+\s+\d{1,2},?\s+\d{4})/i
+  );
+  if (estMatch) result.expectedReturnDate = parseTextDate(estMatch[1]);
+
+  // Extract arrival date from status timeline
+  const arrivedMatch = text.match(
+    /Order\s*Arrived\s*[\n\r\s]*(\w{3,9}\s+\d{1,2},?\s+\d{4})/i
+  );
+  if (arrivedMatch) {
+    const date = parseTextDate(arrivedMatch[1]);
+    if (date) {
+      result.receivedDate = date;
+      result.submittedDate = date;
+    }
+  }
+
+  // Extract total items: "6 Items" or "Items 6"
+  const itemsMatch = text.match(/(\d+)\s*Items/i);
+  if (itemsMatch) result.totalCards = parseInt(itemsMatch[1]);
+
+  // ---- Card/Item extraction from the rendered DOM ----
+  const cardsSeen = new Set();
+
+  // Strategy A: Look for item rows/cards in the Items section
+  // Find all elements that might be card entries
+  const allElements = document.querySelectorAll("*");
+  const itemElements = [];
+
+  for (const el of allElements) {
+    // Look for elements whose direct text contains a card-like description
+    // Card descriptions typically start with a year: "2025 POKEMON..."
+    const directText = getDirectText(el);
+    if (/^(19|20)\d{2}\s+[A-Z]/m.test(directText) && directText.length < 300) {
+      itemElements.push(el);
+    }
+  }
+
+  for (const el of itemElements) {
+    const itemText = el.textContent?.trim() || "";
+    if (itemText.length > 500) continue; // Skip containers that are too large
+
+    // Parse card description: "2025 POKEMON JTG EN-JOURNEY TOGETHER BOOSTER..."
+    const cardMatch = itemText.match(
+      /\b((?:19|20)\d{2})\s+(.+)/
+    );
+    if (!cardMatch) continue;
+
+    const fullDesc = cardMatch[0].substring(0, 200).trim();
+    if (cardsSeen.has(fullDesc)) continue;
+    cardsSeen.add(fullDesc);
+
+    const year = cardMatch[1];
+    const restOfDesc = cardMatch[2].trim();
+
+    // Try to split into brand and subject
+    // Brand is typically the first word(s) in ALL CAPS before the description
+    const brandMatch = restOfDesc.match(/^([A-Z][A-Z0-9\s&'./-]+?)(?:\s+(?:EN-|#|\d|[a-z]))/);
+    let brand = "";
+    let subject = restOfDesc;
+
+    if (brandMatch) {
+      brand = brandMatch[1].trim();
+      subject = restOfDesc.substring(brand.length).trim();
+    } else {
+      // Take first word as brand
+      const parts = restOfDesc.split(/\s+/);
+      brand = parts[0] || "";
+      subject = parts.slice(1).join(" ");
+    }
+
+    // Look for card number pattern like #123 or /123
+    let cardNumber = "";
+    const numMatch = subject.match(/#(\d+(?:\/\d+)?)/);
+    if (numMatch) cardNumber = numMatch[1];
+
+    // Look for declared value near this element
+    let declaredValue = 0;
+    const parent = el.parentElement;
+    if (parent) {
+      const parentText = parent.textContent || "";
+      const valMatch = parentText.match(/\$\s*([\d,]+(?:\.\d{2})?)/);
+      if (valMatch) declaredValue = parseFloat(valMatch[1].replace(/,/g, ""));
+    }
+
+    result.cards.push({
+      year,
+      brand,
+      cardNumber,
+      subject: subject.substring(0, 150),
+      declaredValue,
+    });
+  }
+
+  // Strategy B: If no cards found via elements, try the full page text
+  if (result.cards.length === 0) {
+    // Look for lines that start with a year
+    const lines = text.split(/\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      const cardMatch = trimmed.match(/^((?:19|20)\d{2})\s+([A-Z].{5,150})/);
+      if (!cardMatch) continue;
+
+      const desc = cardMatch[0].substring(0, 200);
+      if (cardsSeen.has(desc)) continue;
+      // Skip known non-card lines
+      if (/order|arrived|business|complete|status|shipped|est\./i.test(desc)) continue;
+      cardsSeen.add(desc);
+
+      const year = cardMatch[1];
+      const rest = cardMatch[2].trim();
+      const parts = rest.split(/\s+/);
+      const brand = parts[0] || "";
+      const subject = parts.slice(1).join(" ");
+
+      result.cards.push({
+        year,
+        brand,
+        cardNumber: "",
+        subject: subject.substring(0, 150),
+        declaredValue: 0,
+      });
+    }
+  }
+
+  // Helper: get only the direct text of an element (not children's text)
+  function getDirectText(el) {
+    let text = "";
+    for (const node of el.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        text += node.textContent;
+      }
+    }
+    return text.trim();
+  }
+
+  return result;
 }

@@ -3,7 +3,7 @@
   "name": "PSA Tracker Importer",
   "version": "1.0.0",
   "description": "Import your PSA submissions into PSA Tracker",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "tabs"],
   "host_permissions": [
     "https://www.psacard.com/*",
     "https://app.collectors.com/*",

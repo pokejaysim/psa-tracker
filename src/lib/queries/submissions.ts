@@ -49,8 +49,8 @@ export function createSubmission(input: CreateSubmissionInput): Submission {
   const now = new Date().toISOString();
 
   db.prepare(
-    `INSERT INTO submissions (id, orderNumber, submissionNumber, serviceLevel, status, submittedDate, receivedDate, expectedReturnDate, totalDeclaredValue, notes, createdAt, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO submissions (id, orderNumber, submissionNumber, serviceLevel, status, submittedDate, receivedDate, expectedReturnDate, totalCards, totalDeclaredValue, notes, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     input.orderNumber,
@@ -60,6 +60,7 @@ export function createSubmission(input: CreateSubmissionInput): Submission {
     input.submittedDate,
     input.receivedDate ?? null,
     input.expectedReturnDate ?? null,
+    input.totalCards ?? 0,
     input.totalDeclaredValue ?? 0,
     input.notes ?? "",
     now,

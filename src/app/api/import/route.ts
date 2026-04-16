@@ -4,7 +4,21 @@ import {
   createSubmission,
   updateSubmission,
 } from "@/lib/queries/submissions";
+import {
+  getCardsBySubmission,
+  createCard,
+  getNextLineNumber,
+} from "@/lib/queries/cards";
 import { SubmissionStatus, ServiceLevel } from "@/types";
+
+interface ImportedCard {
+  year?: string;
+  brand?: string;
+  cardNumber?: string;
+  subject?: string;
+  lineNumber?: number;
+  declaredValue?: number;
+}
 
 interface ImportedSubmission {
   orderNumber: string;
@@ -16,12 +30,13 @@ interface ImportedSubmission {
   expectedReturnDate?: string;
   totalCards?: number;
   totalDeclaredValue?: number;
+  cards?: ImportedCard[];
 }
 
 function mapServiceLevel(raw?: string): ServiceLevel {
   if (!raw) return "regular";
-  const lower = raw.toLowerCase().replace(/[^a-z]/g, "");
-  if (lower.includes("valuebulk") || lower.includes("bulk")) return "value_bulk";
+  const lower = raw.toLowerCase().replace(/[^a-z_]/g, "");
+  if (lower.includes("valuebulk") || lower === "value_bulk") return "value_bulk";
   if (lower.includes("valueplus")) return "value_plus";
   if (lower.includes("valuemax")) return "value_max";
   if (lower.includes("value")) return "value";
@@ -57,7 +72,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No submissions provided" }, { status: 400 });
     }
 
-    const results: { orderNumber: string; action: "created" | "updated" | "skipped"; id: string }[] = [];
+    const results: { orderNumber: string; action: "created" | "updated" | "skipped"; id: string; cardsAdded: number }[] = [];
 
     for (const sub of submissions) {
       if (!sub.orderNumber) continue;
@@ -65,11 +80,9 @@ export async function POST(request: NextRequest) {
       const existing = getSubmissionByOrderNumber(sub.orderNumber);
 
       if (existing) {
-        // Update with any new data from the import
         const updates: Record<string, unknown> = {};
         if (sub.status) {
-          const mapped = mapStatus(sub.status);
-          updates.status = mapped;
+          updates.status = mapStatus(sub.status);
         }
         if (sub.submissionNumber && !existing.submissionNumber) {
           updates.submissionNumber = sub.submissionNumber;
@@ -80,12 +93,32 @@ export async function POST(request: NextRequest) {
         if (sub.expectedReturnDate && !existing.expectedReturnDate) {
           updates.expectedReturnDate = sub.expectedReturnDate;
         }
+        if (sub.submittedDate && !existing.submittedDate) {
+          updates.submittedDate = sub.submittedDate;
+        }
+        if (sub.totalCards && (!existing.totalCards || existing.totalCards === 0)) {
+          updates.totalCards = sub.totalCards;
+        }
+        if (sub.serviceLevel) {
+          updates.serviceLevel = mapServiceLevel(sub.serviceLevel);
+        }
 
-        if (Object.keys(updates).length > 0) {
-          updateSubmission(existing.id, updates);
-          results.push({ orderNumber: sub.orderNumber, action: "updated", id: existing.id });
+        // Import cards if provided and submission has none yet
+        let cardsAdded = 0;
+        if (sub.cards && sub.cards.length > 0) {
+          const existingCards = getCardsBySubmission(existing.id);
+          if (existingCards.length === 0) {
+            cardsAdded = importCards(existing.id, sub.cards);
+          }
+        }
+
+        if (Object.keys(updates).length > 0 || cardsAdded > 0) {
+          if (Object.keys(updates).length > 0) {
+            updateSubmission(existing.id, updates);
+          }
+          results.push({ orderNumber: sub.orderNumber, action: "updated", id: existing.id, cardsAdded });
         } else {
-          results.push({ orderNumber: sub.orderNumber, action: "skipped", id: existing.id });
+          results.push({ orderNumber: sub.orderNumber, action: "skipped", id: existing.id, cardsAdded: 0 });
         }
       } else {
         const created = createSubmission({
@@ -93,24 +126,54 @@ export async function POST(request: NextRequest) {
           submissionNumber: sub.submissionNumber,
           serviceLevel: mapServiceLevel(sub.serviceLevel),
           status: mapStatus(sub.status),
-          submittedDate: sub.submittedDate || new Date().toISOString().split("T")[0],
+          submittedDate: sub.submittedDate || sub.receivedDate || "",
           receivedDate: sub.receivedDate,
           expectedReturnDate: sub.expectedReturnDate,
+          totalCards: sub.totalCards,
           totalDeclaredValue: sub.totalDeclaredValue ?? 0,
         });
-        results.push({ orderNumber: sub.orderNumber, action: "created", id: created.id });
+
+        // Import cards
+        let cardsAdded = 0;
+        if (sub.cards && sub.cards.length > 0) {
+          cardsAdded = importCards(created.id, sub.cards);
+        }
+
+        results.push({ orderNumber: sub.orderNumber, action: "created", id: created.id, cardsAdded });
       }
     }
 
     const created = results.filter((r) => r.action === "created").length;
     const updated = results.filter((r) => r.action === "updated").length;
+    const totalCards = results.reduce((sum, r) => sum + r.cardsAdded, 0);
 
     return NextResponse.json({
-      message: `Imported ${created} new, updated ${updated} existing`,
+      message: `Imported ${created} new, updated ${updated} existing, ${totalCards} cards added`,
       results,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+function importCards(submissionId: string, cards: ImportedCard[]): number {
+  let added = 0;
+  for (const card of cards) {
+    if (!card.year && !card.brand && !card.subject) continue;
+
+    const lineNumber = card.lineNumber || getNextLineNumber(submissionId);
+
+    createCard({
+      submissionId,
+      lineNumber,
+      year: card.year || "",
+      brand: card.brand || "",
+      cardNumber: card.cardNumber || "",
+      subject: card.subject || "",
+      declaredValue: card.declaredValue ?? 0,
+    });
+    added++;
+  }
+  return added;
 }
