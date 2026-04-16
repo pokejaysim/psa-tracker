@@ -29,11 +29,17 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
 });
 
 // Wait for a tab to finish loading + extra time for JS rendering
-function waitForTab(tabId, delay = 2000) {
-  return new Promise((resolve) => {
+function waitForTab(tabId, delay = 2500) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(); // Resolve anyway after timeout
+    }, 15000);
+
     function listener(id, info) {
       if (id === tabId && info.status === "complete") {
         chrome.tabs.onUpdated.removeListener(listener);
+        clearTimeout(timeout);
         setTimeout(resolve, delay);
       }
     }
@@ -53,7 +59,6 @@ importBtn.addEventListener("click", async () => {
       active: true,
       currentWindow: true,
     });
-    const originalUrl = tab.url;
 
     // Phase 1: Scrape order list to get order entries + detail URLs
     const [listResult] = await chrome.scripting.executeScript({
@@ -74,21 +79,26 @@ importBtn.addEventListener("click", async () => {
       return;
     }
 
-    // Phase 2: Navigate to each order detail page and scrape cards
+    // Phase 2: Open each order detail in a background tab, scrape, close
     for (let i = 0; i < orders.length; i++) {
       const order = orders[i];
       if (!order.detailUrl) continue;
 
       importBtnText.textContent = `Scraping order ${i + 1}/${orders.length}...`;
 
+      let bgTab = null;
       try {
-        // Navigate tab to the detail page
-        await chrome.tabs.update(tab.id, { url: order.detailUrl });
-        await waitForTab(tab.id, 2000);
+        // Open detail page in a background tab (not active)
+        bgTab = await chrome.tabs.create({
+          url: order.detailUrl,
+          active: false,
+        });
 
-        // Scrape the rendered detail page
+        await waitForTab(bgTab.id, 2500);
+
+        // Scrape the fully rendered detail page
         const [detailResult] = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
+          target: { tabId: bgTab.id },
           func: scrapeOrderDetailPage,
         });
 
@@ -101,18 +111,16 @@ importBtn.addEventListener("click", async () => {
           if (detail.cards && detail.cards.length > 0)
             order.cards = detail.cards;
           if (detail.totalCards) order.totalCards = detail.totalCards;
+          if (detail.status) order.status = detail.status;
         }
       } catch (e) {
         // Skip this order's detail, keep list-level data
+      } finally {
+        // Always close the background tab
+        if (bgTab) {
+          try { await chrome.tabs.remove(bgTab.id); } catch {}
+        }
       }
-    }
-
-    // Navigate back to the original page
-    importBtnText.textContent = "Finishing up...";
-    try {
-      await chrome.tabs.update(tab.id, { url: originalUrl });
-    } catch {
-      // Ignore navigation errors
     }
 
     // Phase 3: Send to tracker
@@ -191,16 +199,23 @@ function scrapeOrderList() {
   // Walk up from an element to find the full row container
   function getRowContainer(el) {
     let current = el;
+    let bestMatch = el;
     for (let i = 0; i < 8; i++) {
       if (!current.parentElement) break;
       current = current.parentElement;
       const text = current.textContent || "";
-      if (/Sub\s*#/i.test(text) && /\d+\s*(?:Cards?|Items?)/i.test(text)) {
-        return current;
+
+      // Stop if we've gone too high (contains multiple orders)
+      const subCount = (text.match(/Sub\s*#\d{7,10}/gi) || []).length;
+      if (subCount > 1) break;
+
+      // Good candidate: contains both sub# and card count
+      if (subCount === 1 && /\d+\s*(?:Cards?|Items?)/i.test(text)) {
+        bestMatch = current;
       }
       if (current.tagName === "TR") return current;
     }
-    return el;
+    return bestMatch;
   }
 
   // Find all links that point to order detail pages
@@ -243,20 +258,20 @@ function scrapeOrderList() {
     if (!order.orderNumber && order.submissionNumber) order.orderNumber = order.submissionNumber;
     if (!order.orderNumber) continue;
 
-    // Extract status
+    // Extract status — check most advanced first so it wins if multiple appear
     const statusPatterns = [
-      [/research\s*&?\s*id/i, "research"],
-      [/grades?\s*ready/i, "grades ready"],
-      [/order\s*prep/i, "order prep"],
-      [/\bcompleting\b/i, "processing"],
-      [/\bcomplete\b/i, "complete"],
-      [/\bgrading\b/i, "grading"],
-      [/\bassembly\b/i, "assembly"],
-      [/\bshipped\b/i, "shipped"],
       [/\bdelivered\b/i, "delivered"],
-      [/\barrived\b/i, "arrived"],
+      [/\bshipped\b/i, "shipped"],
+      [/\bcompleting\b/i, "processing"],
+      [/\bcomplete\b(?!\s*by)/i, "complete"],
       [/\bprocessing\b/i, "processing"],
       [/\bqa\s*checks?\b/i, "qa"],
+      [/grades?\s*ready/i, "grades ready"],
+      [/\bassembly\b/i, "assembly"],
+      [/\bgrading\b/i, "grading"],
+      [/research\s*&?\s*id/i, "research"],
+      [/order\s*prep/i, "order prep"],
+      [/\barrived\b/i, "arrived"],
     ];
     for (const [pattern, status] of statusPatterns) {
       if (pattern.test(rowText)) {
@@ -341,6 +356,7 @@ function scrapeOrderDetailPage() {
     submittedDate: null,
     totalCards: null,
     psaOrderNumber: null,
+    status: null,
   };
 
   // Extract PSA order number: "Order #26536028"
@@ -352,6 +368,50 @@ function scrapeOrderDetailPage() {
     /Est\.?\s*Complete\s*by\s+(\w+\s+\d{1,2},?\s+\d{4})/i
   );
   if (estMatch) result.expectedReturnDate = parseTextDate(estMatch[1]);
+
+  // Extract current status from the detail page
+  // Strategy 1: PSA shows a description like "Your submission is going through
+  // the authentication and grading process."
+  const descPatterns = [
+    [/shipped/i, "shipped"],
+    [/delivered/i, "delivered"],
+    [/completing/i, "processing"],
+    [/qa\s*check/i, "qa"],
+    [/grades?\s*ready/i, "grades ready"],
+    [/assembly/i, "assembly"],
+    [/grading/i, "grading"],
+    [/research|identification/i, "research"],
+    [/order\s*prep/i, "order prep"],
+    [/arrived|received/i, "arrived"],
+  ];
+  // Look for the status description text specifically
+  const descMatch = text.match(/your\s+submission\s+is\s+.{0,100}/i);
+  if (descMatch) {
+    for (const [pattern, status] of descPatterns) {
+      if (pattern.test(descMatch[0])) {
+        result.status = status;
+        break;
+      }
+    }
+  }
+
+  // Strategy 2: Find the last bold/active step in the progress bar
+  // Look for elements that appear to be the "current" status step
+  if (!result.status) {
+    const stepElements = document.querySelectorAll(
+      "[class*='active'], [class*='current'], [aria-current], [data-active], strong, b"
+    );
+    for (const el of stepElements) {
+      const stepText = el.textContent?.trim() || "";
+      for (const [pattern, status] of descPatterns) {
+        if (pattern.test(stepText) && stepText.length < 30) {
+          result.status = status;
+          break;
+        }
+      }
+      if (result.status) break;
+    }
+  }
 
   // Extract arrival date from status timeline
   const arrivedMatch = text.match(
